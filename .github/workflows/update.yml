@@ -1,0 +1,45 @@
+name: 종목 목록 갱신
+
+on:
+  schedule:
+    # UTC 기준이다. 21:10 UTC = 06:10 KST — 장이 열기 전에 하루치를 받아둔다.
+    # ⚠️ 크론은 정시에 안 돈다(몇십 분 늦거나 건너뛴다). 목록엔 무해하다.
+    - cron: '10 21 * * *'
+  # 손으로도 돌릴 수 있게 — **첫 확인은 이걸로 한다.**
+  workflow_dispatch:
+
+# 워크플로가 커밋을 밀어야 하므로 쓰기 권한이 필요하다.
+permissions:
+  contents: write
+
+# 앞의 실행이 안 끝났는데 또 시작하면 서로 밀어낸다.
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install requests
+
+      - name: 목록 받기
+        env:
+          DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}
+        run: python scripts/fetch_symbols.py
+
+      # **바뀐 게 없으면 커밋하지 않는다** — 안 그러면 매일 빈 커밋이 쌓인다.
+      - name: 바뀌었으면 커밋
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add docs/symbols/krx.json
+          git diff --cached --quiet && echo '바뀐 게 없다' && exit 0
+          git commit -m "목록 갱신 $(date -u +%Y-%m-%d)"
+          git push
