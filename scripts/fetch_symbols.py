@@ -60,12 +60,19 @@ PAUSE = 0.2
 
 
 def call(path: str, **params) -> dict:
-    r = requests.get(
-        f"{BASE}/{path}",
-        # 키를 params로 넘긴다 — 문자열을 직접 이어 붙이면 실수로 로그에 남기기 쉽다.
-        params={"serviceKey": KEY, "resultType": "json", **params},
-        timeout=30,
-    )
+    try:
+        r = requests.get(
+            f"{BASE}/{path}",
+            # 키를 params로 넘긴다 — 문자열을 직접 이어 붙이면 실수로 로그에 남기기 쉽다.
+            params={"serviceKey": KEY, "resultType": "json", **params},
+            timeout=30,
+        )
+    except Exception as e:
+        # ⚠️ **여길 안 잡으면 키가 샌다.** requests의 연결 예외 메시지엔 URL이 통째로
+        # 들어 있고(`...?serviceKey=aB3%2BxY%3D&...`), 안 잡으면 파이썬이 그 역추적을
+        # 공개 저장소의 Actions 로그에 그대로 찍는다. 깃허브의 자동 가리기(***)는
+        # **인코딩된 형태를 못 알아본다.** 그래서 **예외의 종류만** 남긴다.
+        sys.exit(f"연결 실패: {type(e).__name__} ({path})")
     if r.status_code != 200:
         # ⚠️ r.url도 r.text도 찍지 않는다 — 둘 다 키를 담고 있을 수 있다.
         sys.exit(f"조회 실패: HTTP {r.status_code} ({path})")
