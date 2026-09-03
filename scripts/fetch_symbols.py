@@ -1,4 +1,18 @@
-"""공공데이터포털에서 국내 상장 종목 목록을 받아 docs/symbols/krx.json으로 쓴다.
+"""공공데이터포털에서 국내 종목 목록과 종가를 받아 docs/ 아래에 쓴다.
+
+**`금융위원회_주식시세정보`를 쓴다.** 이 API는 하루치 시세를 주는데 거기에 종목명이
+같이 들어 있다(`srtnCd` 단축코드 · `itmsNm` 종목명 · `clpr` 종가 · `mrktCtg` 시장구분).
+그래서 **한 번 받아 파일 둘을 만든다** — 호출이 늘지 않는다.
+
+  · `docs/symbols/krx.json` — 코드·이름. 앱의 **한글 검색**이 쓴다
+  · `docs/prices/krx.json`  — 코드·종가·기준일. 앱의 **시세 예비**가 쓴다
+    (1순위는 계속 야후다. 야후는 장중에도 값이 있고 이건 어제 종가뿐이다)
+
+이용허락범위는 **제한없음**임을 확인했다(사용자, 2026-09-03) — 그래서 종가도 올린다.
+
+⚠️ **`basDt`(기준일자)로 하루를 집어서 받아야 한다.** 안 주면 날짜별 전 이력이 나온다
+(문서 예제의 `totalCount`가 171만 건이다). 그래서 오늘부터 거꾸로 짚어 **가장 최근
+영업일**을 먼저 찾는다 — 주말·공휴일엔 직전 영업일이 최신이다.
 
 규칙 둘:
   · **키를 절대 찍지 않는다.** 이 API는 키를 URL 쿼리에 넣는데, URL을 로그에 남기면
@@ -7,95 +21,186 @@
   · **실패하면 아무것도 안 쓴다.** 빈 파일로 덮으면 앱의 검색이 통째로 죽는다.
 """
 
+# `str | None` 같은 표기를 옛 파이썬에서도 쓰게 해준다(워크플로는 3.12지만
+# 손으로 돌려볼 땐 그보다 낮을 수 있다).
+from __future__ import annotations
+
 import datetime
 import json
 import os
 import pathlib
+import re
 import sys
+import time
 
 import requests
 
 KEY = os.environ["DATA_GO_KR_KEY"]
-BASE = "https://apis.data.go.kr/1160100/service/GetKrxListedInfoService/getItemInfo"
-OUT = pathlib.Path("docs/symbols/krx.json")
+BASE = "https://apis.data.go.kr/1160100/service"
+
+# 주식과 나머지는 **서비스가 갈린다.** 포털에서 각각 따로 활용신청해야 그 키로 불린다.
+# 아직 신청 안 한 게 있으면 그 줄만 지우면 된다 — 주식만으로도 목록은 선다.
+SERVICES = [
+    ("주식", "GetStockSecuritiesInfoService/getStockPriceInfo"),
+    ("ETF", "GetSecuritiesProductInfoService/getETFPriceInfo"),
+    ("ETN", "GetSecuritiesProductInfoService/getETNPriceInfo"),
+]
+
+# ⚠️ **ELW(`getETFPriceInfo`와 같은 서비스의 `getELWPriceInfo`)는 일부러 뺐다.**
+#   ① 하루치가 **5,000개쯤**이라 목록이 두 배가 된다(주식이 2,700개다)
+#   ② 이름이 `신한H501삼성전자콜` 꼴이라 **`삼성전자`를 치면 수백 개가 걸린다** — 검색이 죽는다
+#   ③ 애초에 리밸런싱으로 들고 갈 물건이 아니다(단기 파생이다)
+#   ④ 코드가 `50H501`이라 앱의 국내 코드 규칙(`\d{4}` + 두 자리)에 안 맞는다
+
+SYMBOLS_OUT = pathlib.Path("docs/symbols/krx.json")
+PRICES_OUT = pathlib.Path("docs/prices/krx.json")
 PAGE = 1000
+# 문서상 초당 30건까지다. 넉넉히 쉬어간다 — 하루 한 번 도는 일이라 급할 게 없다.
+PAUSE = 0.2
 
 
-def fetch_page(page: int) -> list[dict]:
+def call(path: str, **params) -> dict:
     r = requests.get(
-        BASE,
+        f"{BASE}/{path}",
         # 키를 params로 넘긴다 — 문자열을 직접 이어 붙이면 실수로 로그에 남기기 쉽다.
-        params={
-            "serviceKey": KEY,
-            "resultType": "json",
-            "numOfRows": PAGE,
-            "pageNo": page,
-        },
+        params={"serviceKey": KEY, "resultType": "json", **params},
         timeout=30,
     )
     if r.status_code != 200:
         # ⚠️ r.url도 r.text도 찍지 않는다 — 둘 다 키를 담고 있을 수 있다.
-        sys.exit(f"조회 실패: HTTP {r.status_code} (page {page})")
+        sys.exit(f"조회 실패: HTTP {r.status_code} ({path})")
     try:
-        body = r.json()["response"]["body"]
+        return r.json()["response"]["body"]
     except Exception:
-        sys.exit(f"응답이 예상과 다르다 (page {page})")
-    items = body.get("items", {}).get("item", [])
+        # 키가 틀리면 200에 XML 에러 문서가 오기도 한다.
+        sys.exit(f"응답이 예상과 다르다 ({path}) — 인증키를 확인할 것(디코딩 키여야 한다)")
+
+
+def rows_of(body: dict) -> list[dict]:
+    items = (body.get("items") or {}).get("item") or []
     return items if isinstance(items, list) else [items]
 
 
+def latest_business_day(path: str) -> str:
+    """오늘부터 거꾸로 짚어 데이터가 있는 첫 날. 주말·공휴일을 이걸로 넘긴다."""
+    today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+    for back in range(10):
+        day = (today - datetime.timedelta(days=back)).strftime("%Y%m%d")
+        body = call(path, basDt=day, numOfRows=1, pageNo=1)
+        if int(body.get("totalCount") or 0) > 0:
+            return day
+        time.sleep(PAUSE)
+    sys.exit(f"최근 10일 안에 데이터가 없다 ({path})")
+
+
+def fetch_day(path: str, day: str) -> list[dict]:
+    out: list[dict] = []
+    page = 1
+    while True:
+        body = call(path, basDt=day, numOfRows=PAGE, pageNo=page)
+        got = rows_of(body)
+        out += got
+        if len(got) < PAGE:
+            return out
+        page += 1
+        if page > 50:  # 안전장치 — 5만 건이면 뭔가 잘못된 것이다
+            sys.exit(f"페이지가 너무 많다 ({path})")
+        time.sleep(PAUSE)
+
+
+def price_of(row: dict) -> float | None:
+    """종가. 0이나 빈 값은 **없는 것으로 친다** — 거래정지 종목이 0으로 오기도 한다."""
+    try:
+        value = float(str(row.get("clpr") or "").replace(",", ""))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def write(path: pathlib.Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+
+# 국내 단축코드 — **앞 네 자리는 숫자, 뒤 두 자리는 숫자나 글자**다.
+#
+# ⚠️ **숫자만 걸러내면 안 된다.** `0085P0`·`00104K`처럼 글자가 섞인 종목이 있고,
+# 그걸 버리면 그 종목은 **검색에 영영 안 나온다.** 앱도 같은 함정을 밟았다가 고쳤다
+# (2026-09-02, `lib/services/quote_service.dart`의 `marketOf`) — **두 곳의 규칙이
+# 같아야 한다.** 여기서 통과시킨 코드를 앱이 국내로 못 알아보면 검색해도 못 고른다.
+CODE = re.compile(r"^[0-9]{4}[A-Z0-9]{2}$")
+
+
 def code_of(row: dict) -> str | None:
-    """단축코드 6자리. `A005930`처럼 앞에 글자가 붙어 오기도 한다."""
-    raw = str(row.get("srtnCd") or "")
-    digits = "".join(c for c in raw if c.isdigit())
-    return digits[-6:] if len(digits) >= 6 else None
+    raw = str(row.get("srtnCd") or "").strip().upper()
+    # `A005930`처럼 앞에 글자가 붙어 오는 경우가 있다.
+    if len(raw) == 7 and raw[0] == "A":
+        raw = raw[1:]
+    return raw if CODE.match(raw) else None
 
 
 def main() -> None:
-    rows: list[dict] = []
-    page = 1
-    while True:
-        got = fetch_page(page)
-        rows += got
-        if len(got) < PAGE:
-            break
-        page += 1
-        if page > 50:  # 안전장치 — 5만 건이면 뭔가 잘못된 것이다
-            sys.exit("페이지가 너무 많다")
+    names: dict[str, str] = {}
+    prices: dict[str, tuple[float, str]] = {}
+    days: dict[str, str] = {}
+    sample_keys: list[str] = []
 
-    # 코드 기준으로 겹치는 걸 지운다(같은 종목이 여러 시장에 걸쳐 나오기도 한다).
-    by_code: dict[str, str] = {}
-    for row in rows:
-        code = code_of(row)
-        name = str(row.get("itmsNm") or "").strip()
-        if code and name:
-            by_code.setdefault(code, name)
+    for label, path in SERVICES:
+        day = latest_business_day(path)
+        rows = fetch_day(path, day)
+        days[label] = day
+        if rows and not sample_keys:
+            sample_keys = sorted(rows[0].keys())
 
-    if not by_code:
-        # 여기 걸리면 필드 이름이 짐작과 다른 것이다.
+        before = len(names)
+        for row in rows:
+            code = code_of(row)
+            if not code:
+                continue
+            name = str(row.get("itmsNm") or "").strip()
+            if name:
+                names.setdefault(code, name)
+            price = price_of(row)
+            if price is not None:
+                # 기준일은 **줄에 적힌 것**을 쓴다 — 우리가 물어본 날과 다를 수 있다.
+                prices.setdefault(code, (price, str(row.get("basDt") or day)))
+        print(f"{label}: {day} 기준 {len(rows)}줄 → 이름 {len(names) - before}개 더함")
+
+    if not names:
+        # 여기 걸리면 칸 이름이 문서와 다른 것이다.
         # **칸 이름만** 찍는다 — 거기엔 비밀이 없다. 이 줄을 그대로 알려주면 고칠 수 있다.
-        sample = sorted(rows[0].keys()) if rows else []
-        sys.exit(f"쓸 수 있는 줄이 없다. 받은 칸 이름: {sample}")
+        sys.exit(f"쓸 수 있는 줄이 없다. 받은 칸 이름: {sample_keys}")
 
-    now = datetime.datetime.now(datetime.timezone.utc)
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(
-        json.dumps(
-            {
-                "updatedAt": now.isoformat(timespec="seconds"),
-                "count": len(by_code),
-                # 앱이 읽는 모양 — **이름표를 붙인다**(자리 순서로 적으면 나중에
-                # 값을 하나 더할 때 통째로 밀린다).
-                "items": [
-                    {"code": c, "name": n} for c, n in sorted(by_code.items())
-                ],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
-        encoding="utf-8",
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+    # 앱이 읽는 모양 — **이름표를 붙인다**(자리 순서로 적으면 나중에 값을 하나 더할 때
+    # 통째로 밀린다).
+    write(
+        SYMBOLS_OUT,
+        {
+            "updatedAt": now,
+            "basDt": days,
+            "count": len(names),
+            "items": [{"code": c, "name": n} for c, n in sorted(names.items())],
+        },
     )
-    print(f"{len(by_code)}개 종목을 썼다")
+    write(
+        PRICES_OUT,
+        {
+            "updatedAt": now,
+            "count": len(prices),
+            # 기준일을 **줄마다** 담는다 — 주식과 ETF가 다른 날일 수 있고,
+            # 앱은 "언제 가격인지"를 화면에 적는다.
+            "items": [
+                {"code": c, "close": p, "asOf": d}
+                for c, (p, d) in sorted(prices.items())
+            ],
+        },
+    )
+    print(f"이름 {len(names)}개 · 종가 {len(prices)}개를 썼다")
 
 
 main()
