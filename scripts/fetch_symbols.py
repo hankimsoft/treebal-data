@@ -15,6 +15,10 @@
 (문서 예제의 `totalCount`가 171만 건이다). 그래서 오늘부터 거꾸로 짚어 **가장 최근
 영업일**을 먼저 찾는다 — 주말·공휴일엔 직전 영업일이 최신이다.
 
+**포털이 몇 시에 올리는지 모른다.** 그래서 크론이 저녁에 여러 번 돈다(워크플로 참고).
+대신 **날짜만 짚어보고 이미 최신이면 그 자리에서 끝낸다** — 헛도는 실행이
+전부 받아오지 않게. 그런 실행은 호출 서너 번으로 끝난다.
+
 규칙 둘:
   · **키를 절대 찍지 않는다.** 이 API는 키를 URL 쿼리에 넣는데, URL을 로그에 남기면
     공개 저장소의 Actions 로그로 그대로 나간다. 깃허브의 자동 가리기(***)는
@@ -151,6 +155,14 @@ def write(path: pathlib.Path, payload: dict) -> None:
 CODE = re.compile(r"^(?:[0-9]{4}[A-Z0-9]{2}|[0-9]{8})$")
 
 
+def saved_days() -> dict[str, str]:
+    """지난 실행이 남긴 서비스별 기준일. 파일이 없거나 깨졌으면 빈 값."""
+    try:
+        return json.loads(SYMBOLS_OUT.read_text(encoding="utf-8"))["basDt"]
+    except Exception:
+        return {}
+
+
 def code_of(row: dict) -> str | None:
     raw = str(row.get("srtnCd") or "").strip().upper()
     # `A005930`처럼 앞에 글자가 붙어 오는 경우가 있다.
@@ -160,16 +172,21 @@ def code_of(row: dict) -> str | None:
 
 
 def main() -> None:
+    # **날짜부터 짚는다.** 포털이 몇 시에 올리는지 몰라 크론이 여러 번 도는데,
+    # 이미 받아둔 날짜면 **전부 받을 필요가 없다** — 호출 서너 번으로 끝낸다.
+    days = {label: latest_business_day(path) for label, path in SERVICES}
+    if days == saved_days():
+        print(f"이미 최신이다 ({days}) — 받을 게 없다")
+        return
+
     names: dict[str, str] = {}
     caps: dict[str, float] = {}
     prices: dict[str, tuple[float, str]] = {}
-    days: dict[str, str] = {}
     sample_keys: list[str] = []
 
     for label, path in SERVICES:
-        day = latest_business_day(path)
+        day = days[label]
         rows = fetch_day(path, day)
-        days[label] = day
         if rows and not sample_keys:
             sample_keys = sorted(rows[0].keys())
 
