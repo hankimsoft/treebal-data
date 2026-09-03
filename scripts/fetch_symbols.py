@@ -4,7 +4,8 @@
 같이 들어 있다(`srtnCd` 단축코드 · `itmsNm` 종목명 · `clpr` 종가 · `mrktCtg` 시장구분).
 그래서 **한 번 받아 파일 둘을 만든다** — 호출이 늘지 않는다.
 
-  · `docs/symbols/krx.json` — 코드·이름. 앱의 **한글 검색**이 쓴다
+  · `docs/symbols/krx.json` — 코드·이름·시가총액. 앱의 **한글 검색**이 쓴다
+    (시가총액은 **순위**에 쓴다 — `삼성`을 쳤을 때 `삼성전자`가 위로 와야 한다)
   · `docs/prices/krx.json`  — 코드·종가·기준일. 앱의 **시세 예비**가 쓴다
     (1순위는 계속 야후다. 야후는 장중에도 값이 있고 이건 어제 종가뿐이다)
 
@@ -44,6 +45,8 @@ SERVICES = [
     ("주식", "GetStockSecuritiesInfoService/getStockPriceInfo"),
     ("ETF", "GetSecuritiesProductInfoService/getETFPriceInfo"),
     ("ETN", "GetSecuritiesProductInfoService/getETNPriceInfo"),
+    # KRX 금시장 — `금 99.99_1Kg`(04020000)·미니금. **종가가 원/g**이다.
+    ("금", "GetGeneralProductInfoService/getGoldPriceInfo"),
 ]
 
 # ⚠️ **ELW(`getETFPriceInfo`와 같은 서비스의 `getELWPriceInfo`)는 일부러 뺐다.**
@@ -115,13 +118,18 @@ def fetch_day(path: str, day: str) -> list[dict]:
         time.sleep(PAUSE)
 
 
-def price_of(row: dict) -> float | None:
-    """종가. 0이나 빈 값은 **없는 것으로 친다** — 거래정지 종목이 0으로 오기도 한다."""
+def number_of(row: dict, key: str) -> float | None:
+    """숫자 칸. 콤마가 섞여 오기도 하고, 빈 값·0은 **없는 것으로 친다.**"""
     try:
-        value = float(str(row.get("clpr") or "").replace(",", ""))
+        value = float(str(row.get(key) or "").replace(",", ""))
     except ValueError:
         return None
     return value if value > 0 else None
+
+
+def price_of(row: dict) -> float | None:
+    """종가. 0이나 빈 값은 **없는 것으로 친다** — 거래정지 종목이 0으로 오기도 한다."""
+    return number_of(row, "clpr")
 
 
 def write(path: pathlib.Path, payload: dict) -> None:
@@ -132,25 +140,28 @@ def write(path: pathlib.Path, payload: dict) -> None:
     )
 
 
-# 국내 단축코드 — **앞 네 자리는 숫자, 뒤 두 자리는 숫자나 글자**다.
+# 국내 코드는 두 모양이다.
+#   · 주식·ETF·ETN — **여섯 자리인데 숫자만은 아니다**(`0085P0`·`00104K`)
+#   · 일반상품(금)  — **여덟 자리 숫자**(`04020000`)
 #
-# ⚠️ **숫자만 걸러내면 안 된다.** `0085P0`·`00104K`처럼 글자가 섞인 종목이 있고,
-# 그걸 버리면 그 종목은 **검색에 영영 안 나온다.** 앱도 같은 함정을 밟았다가 고쳤다
-# (2026-09-02, `lib/services/quote_service.dart`의 `marketOf`) — **두 곳의 규칙이
-# 같아야 한다.** 여기서 통과시킨 코드를 앱이 국내로 못 알아보면 검색해도 못 고른다.
-CODE = re.compile(r"^[0-9]{4}[A-Z0-9]{2}$")
+# ⚠️ **숫자만 걸러내면 안 된다.** 글자가 섞인 종목을 버리면 그건 **검색에 영영 안 나온다.**
+# 앱도 같은 함정을 밟았다가 고쳤다(2026-09-02, `quote_service.dart`의 `marketOf`) —
+# **두 곳의 규칙이 같아야 한다.** 여기서 통과시킨 코드를 앱이 국내로 못 알아보면
+# 검색해서 골라도 시세를 못 부른다.
+CODE = re.compile(r"^(?:[0-9]{4}[A-Z0-9]{2}|[0-9]{8})$")
 
 
 def code_of(row: dict) -> str | None:
     raw = str(row.get("srtnCd") or "").strip().upper()
     # `A005930`처럼 앞에 글자가 붙어 오는 경우가 있다.
-    if len(raw) == 7 and raw[0] == "A":
+    if raw.startswith("A") and CODE.match(raw[1:]):
         raw = raw[1:]
     return raw if CODE.match(raw) else None
 
 
 def main() -> None:
     names: dict[str, str] = {}
+    caps: dict[str, float] = {}
     prices: dict[str, tuple[float, str]] = {}
     days: dict[str, str] = {}
     sample_keys: list[str] = []
@@ -170,6 +181,11 @@ def main() -> None:
             name = str(row.get("itmsNm") or "").strip()
             if name:
                 names.setdefault(code, name)
+            # 시가총액 — **검색 순위에만** 쓴다. 없으면(스팩·일부 ETN) 0으로 두면 되고,
+            # 그러면 그냥 뒤로 밀린다.
+            cap = number_of(row, "mrktTotAmt")
+            if cap is not None:
+                caps.setdefault(code, cap)
             price = price_of(row)
             if price is not None:
                 # 기준일은 **줄에 적힌 것**을 쓴다 — 우리가 물어본 날과 다를 수 있다.
@@ -191,7 +207,10 @@ def main() -> None:
             "updatedAt": now,
             "basDt": days,
             "count": len(names),
-            "items": [{"code": c, "name": n} for c, n in sorted(names.items())],
+            "items": [
+                {"code": c, "name": n, "cap": caps.get(c, 0)}
+                for c, n in sorted(names.items())
+            ],
         },
     )
     write(
