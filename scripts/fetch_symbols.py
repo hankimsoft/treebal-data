@@ -24,6 +24,8 @@
     공개 저장소의 Actions 로그로 그대로 나간다. 깃허브의 자동 가리기(***)는
     글자가 정확히 같을 때만 되는데 URL 인코딩되면(`+`→`%2B`) 못 알아본다.
   · **실패하면 아무것도 안 쓴다.** 빈 파일로 덮으면 앱의 검색이 통째로 죽는다.
+  · **한 서비스가 막혔다고 전부 멈추지 않는다.** 활용신청이 안 된 서비스가 하나 있으면
+    그것만 건너뛴다 — 안 그러면 매시각 실행이 통째로 죽어 **검색·시세가 같이 굳는다.**
 """
 
 # `str | None` 같은 표기를 옛 파이썬에서도 쓰게 해준다(워크플로는 3.12지만
@@ -69,6 +71,27 @@ PAUSE = 0.2
 RETRIES = 3
 RETRY_PAUSE = 5
 
+# **주식은 있어야 한다.** 나머지는 없어도 목록이 선다.
+REQUIRED = SERVICES[0][0]
+
+# 포털이 **200에 XML 오류**를 실어 보낼 때 쓰는 말들 — 활용신청이 안 됐다는 뜻이다.
+# ⚠️ 로그엔 **여기 적힌 낱말만** 나간다(응답 본문을 그대로 찍지 않는다 — 키가 샐 수 있다).
+NOT_REGISTERED = (
+    "SERVICE_KEY_IS_NOT_REGISTERED_ERROR",
+    "SERVICE_ACCESS_DENIED_ERROR",
+    "NO_OPENAPI_SERVICE_ERROR",
+)
+
+
+class Unavailable(Exception):
+    """그 서비스를 **지금 못 쓴다** — 활용신청이 안 됐거나 서비스가 내려갔다.
+
+    잠깐 그런 것(5xx·타임아웃)과 **구분해서** 다룬다. 잠깐이면 실행을 통째로 버리는 게
+    맞다(옛 파일이 그대로 남으므로 앱은 어제 값을 계속 본다). 하지만 **영영 안 될 것**은
+    버릴 게 아니라 **건너뛰어야** 한다 — 안 그러면 매시각 실행이 전부 죽어서
+    금 하나 때문에 **주식 4,000개의 검색과 시세가 같이 굳는다.**
+    """
+
 
 def call(path: str, **params) -> dict:
     """한 번 부른다. **일시적인 실패는 몇 번 다시 시도한다.**
@@ -99,7 +122,11 @@ def call(path: str, **params) -> dict:
             try:
                 return r.json()["response"]["body"]
             except Exception:
-                # 키가 틀리면 200에 XML 에러 문서가 오기도 한다. **다시 해도 같다.**
+                # 키가 틀리거나 **활용신청이 안 됐으면** 200에 XML 에러 문서가 온다.
+                # 어느 쪽이든 **다시 해도 같다.**
+                for token in NOT_REGISTERED:
+                    if token in r.text:
+                        raise Unavailable(token) from None
                 sys.exit(
                     f"응답이 예상과 다르다 ({path}) — 인증키를 확인할 것(디코딩 키여야 한다)"
                 )
@@ -200,13 +227,29 @@ def code_of(row: dict) -> str | None:
     # `A005930`처럼 앞에 글자가 붙어 오는 경우가 있다.
     if raw.startswith("A") and CODE.match(raw[1:]):
         raw = raw[1:]
+    # ⚠️ **앞의 0이 떨어져 올 수 있다.** 일반상품 명세가 스스로 어긋난다 — 설명은
+    # *"8자리"*, 예제 XML은 `04020000`인데 **샘플 칸은 `4020000`(7자리)**이다.
+    # 안 채우면 금이 규칙에 안 맞아 **조용히 빠진다**(로그의 `이름 0개 더함`으로만 보인다).
+    if raw.isdigit() and len(raw) == 7:
+        raw = raw.zfill(8)
     return raw if CODE.match(raw) else None
 
 
 def main() -> None:
     # **날짜부터 짚는다.** 포털이 몇 시에 올리는지 몰라 크론이 여러 번 도는데,
     # 이미 받아둔 날짜면 **전부 받을 필요가 없다** — 호출 서너 번으로 끝낸다.
-    days = {label: latest_business_day(path) for label, path in SERVICES}
+    #
+    # 못 쓰는 서비스는 여기서 걸러진다. `days`에 안 담기므로 아래 수집도 건너뛰고,
+    # 저장되는 `basDt`에도 안 들어간다 — 그래서 **다음 실행의 비교가 어긋나지 않는다.**
+    days: dict[str, str] = {}
+    for label, path in SERVICES:
+        try:
+            days[label] = latest_business_day(path)
+        except Unavailable as e:
+            if label == REQUIRED:
+                sys.exit(f"{label}을 못 쓴다({e}) — 포털에서 활용신청을 확인할 것")
+            print(f"⚠️ {label}: 건너뛴다({e}) — 포털에서 활용신청했는지 볼 것")
+
     if days == saved_days():
         print(f"이미 최신이다 ({days}) — 받을 게 없다")
         return
@@ -217,6 +260,8 @@ def main() -> None:
     sample_keys: list[str] = []
 
     for label, path in SERVICES:
+        if label not in days:
+            continue
         day = days[label]
         rows = fetch_day(path, day)
         if rows and not sample_keys:

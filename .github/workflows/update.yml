@@ -1,4 +1,4 @@
-name: 종목 목록 갱신
+name: 데이터 갱신
 
 on:
   schedule:
@@ -27,6 +27,9 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
+    # 30초 타임아웃이 붙어 있어 멈출 일은 없지만, 만에 하나 멈추면 기본값이 **6시간**이라
+    # `concurrency` 때문에 **그동안 여섯 번의 실행이 통째로 밀린다.**
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
