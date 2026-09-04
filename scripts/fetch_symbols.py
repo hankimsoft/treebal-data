@@ -62,32 +62,57 @@ SERVICES = [
 SYMBOLS_OUT = pathlib.Path("docs/symbols/krx.json")
 PRICES_OUT = pathlib.Path("docs/prices/krx.json")
 PAGE = 1000
-# 문서상 초당 30건까지다. 넉넉히 쉬어간다 — 하루 한 번 도는 일이라 급할 게 없다.
+# 문서상 초당 30건까지다. 넉넉히 쉬어간다 — 급할 게 없는 일이다.
 PAUSE = 0.2
+# 한 번 삐끗했다고 실행을 통째로 버리지 않는다. 한 실행이 호출을 12~18번 하는데
+# **그중 하나만 타임아웃 나도 전부 헛수고**가 된다(2026-09-03 밤 실제로 그랬다).
+RETRIES = 3
+RETRY_PAUSE = 5
 
 
 def call(path: str, **params) -> dict:
-    try:
-        r = requests.get(
-            f"{BASE}/{path}",
-            # 키를 params로 넘긴다 — 문자열을 직접 이어 붙이면 실수로 로그에 남기기 쉽다.
-            params={"serviceKey": KEY, "resultType": "json", **params},
-            timeout=30,
-        )
-    except Exception as e:
-        # ⚠️ **여길 안 잡으면 키가 샌다.** requests의 연결 예외 메시지엔 URL이 통째로
-        # 들어 있고(`...?serviceKey=aB3%2BxY%3D&...`), 안 잡으면 파이썬이 그 역추적을
-        # 공개 저장소의 Actions 로그에 그대로 찍는다. 깃허브의 자동 가리기(***)는
-        # **인코딩된 형태를 못 알아본다.** 그래서 **예외의 종류만** 남긴다.
-        sys.exit(f"연결 실패: {type(e).__name__} ({path})")
-    if r.status_code != 200:
+    """한 번 부른다. **일시적인 실패는 몇 번 다시 시도한다.**
+
+    키가 틀렸거나(401·403) 응답 모양이 다른 건 **다시 해도 같으므로** 바로 죽는다 —
+    괜히 세 번 더 기다릴 이유가 없다.
+    """
+    for attempt in range(1, RETRIES + 1):
+        try:
+            r = requests.get(
+                f"{BASE}/{path}",
+                # 키를 params로 — 문자열을 직접 이어 붙이면 실수로 로그에 남기기 쉽다.
+                params={"serviceKey": KEY, "resultType": "json", **params},
+                timeout=30,
+            )
+        except Exception as e:
+            # ⚠️ **여길 안 잡으면 키가 샌다.** requests의 연결 예외 메시지엔 URL이 통째로
+            # 들어 있고(`...?serviceKey=aB3%2BxY%3D&...`), 안 잡으면 파이썬이 그 역추적을
+            # 공개 저장소의 Actions 로그에 그대로 찍는다. 깃허브의 자동 가리기(***)는
+            # **인코딩된 형태를 못 알아본다.** 그래서 **예외의 종류만** 남긴다.
+            if attempt == RETRIES:
+                sys.exit(f"연결 실패: {type(e).__name__} ({path}) — {RETRIES}번 시도")
+            print(f"  연결 실패({type(e).__name__}) — {RETRY_PAUSE}초 뒤 다시")
+            time.sleep(RETRY_PAUSE)
+            continue
+
+        if r.status_code == 200:
+            try:
+                return r.json()["response"]["body"]
+            except Exception:
+                # 키가 틀리면 200에 XML 에러 문서가 오기도 한다. **다시 해도 같다.**
+                sys.exit(
+                    f"응답이 예상과 다르다 ({path}) — 인증키를 확인할 것(디코딩 키여야 한다)"
+                )
+
+        # 5xx·429는 잠깐 그런 것일 수 있다. 4xx는 다시 해도 같다.
         # ⚠️ r.url도 r.text도 찍지 않는다 — 둘 다 키를 담고 있을 수 있다.
-        sys.exit(f"조회 실패: HTTP {r.status_code} ({path})")
-    try:
-        return r.json()["response"]["body"]
-    except Exception:
-        # 키가 틀리면 200에 XML 에러 문서가 오기도 한다.
-        sys.exit(f"응답이 예상과 다르다 ({path}) — 인증키를 확인할 것(디코딩 키여야 한다)")
+        retryable = r.status_code >= 500 or r.status_code == 429
+        if not retryable or attempt == RETRIES:
+            sys.exit(f"조회 실패: HTTP {r.status_code} ({path})")
+        print(f"  HTTP {r.status_code} — {RETRY_PAUSE}초 뒤 다시")
+        time.sleep(RETRY_PAUSE)
+
+    sys.exit(f"조회 실패 ({path})")  # 여기 오지 않는다
 
 
 def rows_of(body: dict) -> list[dict]:
