@@ -50,7 +50,11 @@ import time
 
 import requests
 
-URL = "https://query1.finance.yahoo.com/v8/finance/chart/{}"
+# 야후는 같은 데이터를 두 호스트로 준다. **한쪽만 막히는 일이 있어** 둘 다 찔러본다.
+# ⚠️ 앱은 `query1`만 쓴다(`yahoo_chart.dart`) — 여기서 `query2`가 되는 것은
+# *"응답 모양이 그대로다"*를 말해줄 뿐, 앱이 잘 된다는 뜻이 아니다.
+HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]
+URL = "https://{}/v8/finance/chart/{}"
 PARAMS = {"range": "5d", "interval": "1d"}
 
 # 야후는 기본 파이썬 UA(`python-requests/...`)를 자주 막는다. 앱은 Dart의 http라 안 걸린다.
@@ -104,9 +108,14 @@ CHECKS = {
 }
 
 TIMEOUT = 20
-RETRIES = 4
+# 세 번이면 `query1 → query2 → query1`로 **두 호스트를 다 거친다.**
+#
+# ⚠️ **더 늘리면 워크플로 타임아웃(10분)에 걸린다** — 종목 둘을 두 바퀴 도는 구조라
+# 시도 하나를 늘릴 때마다 네 번씩 는다. 타임아웃은 **빨간 X**라, 못 본 것을 알리려다
+# **가짜 경보**를 만드는 꼴이 된다. 지금은 최악이 3분 40초쯤이다.
+RETRIES = 3
 # 늘려가며 기다린다 — 요청한도는 잠깐 쉬면 풀리는 종류다.
-RETRY_PAUSES = [10, 30, 60]
+RETRY_PAUSES = [10, 30]
 # 못 본 것을 한 번 더 묻기 전에 쉬는 시간.
 SECOND_ROUND_PAUSE = 60
 
@@ -119,9 +128,13 @@ def meta_of(symbol: str) -> dict:
     """`chart.result[0].meta`. 못 보면 [Unseen]."""
     last = ""
     for attempt in range(1, RETRIES + 1):
+        host = HOSTS[(attempt - 1) % len(HOSTS)]
         try:
             r = requests.get(
-                URL.format(symbol), params=PARAMS, headers=HEADERS, timeout=TIMEOUT
+                URL.format(host, symbol),
+                params=PARAMS,
+                headers=HEADERS,
+                timeout=TIMEOUT,
             )
             if r.status_code == 200:
                 try:
@@ -129,9 +142,9 @@ def meta_of(symbol: str) -> dict:
                 except Exception:
                     # 200인데 모양이 다르다 — 이건 **진짜 신호**다.
                     raise
-            last = f"HTTP {r.status_code}"
+            last = f"HTTP {r.status_code} ({host.split('.')[0]})"
         except Exception as e:
-            last = type(e).__name__
+            last = f"{type(e).__name__} ({host.split('.')[0]})"
         if attempt < RETRIES:
             pause = RETRY_PAUSES[attempt - 1]
             print(f"  {last} — {pause}초 뒤 다시")
