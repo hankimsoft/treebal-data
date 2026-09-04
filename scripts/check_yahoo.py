@@ -35,6 +35,10 @@ Actions 러너 IP는 전 세계가 같이 쓰고 야후를 긁는 사람이 많�
 | **못 봤다**(429 · 연결 실패 · 5xx) | 알리고 **통과**시킨다. 내일 또 본다 |
 | **모양이 다르다** | **실패시킨다** → 메일이 온다 |
 
+⚠️ **먼저 묻는 쪽이 손해다.** 첫 실행에서 국내는 429인데 미국은 됐다 — 국내가 재시도로
+100초를 기다리는 동안 한도가 풀려 **미국이 그 덕을 봤다.** 그래서 한 바퀴 돈 뒤
+**못 본 것만 한 번 더** 물어본다.
+
 브라우저처럼 보이는 `User-Agent`를 붙여 본다. 야후는 기본 파이썬 UA를 자주 막는다 —
 그래도 막히면 위 표대로 조용히 넘어간다.
 """
@@ -103,6 +107,8 @@ TIMEOUT = 20
 RETRIES = 4
 # 늘려가며 기다린다 — 요청한도는 잠깐 쉬면 풀리는 종류다.
 RETRY_PAUSES = [10, 30, 60]
+# 못 본 것을 한 번 더 묻기 전에 쉬는 시간.
+SECOND_ROUND_PAUSE = 60
 
 
 class Unseen(Exception):
@@ -133,47 +139,64 @@ def meta_of(symbol: str) -> dict:
     raise Unseen(f"{symbol}: {last}")
 
 
+def inspect(label: str, symbol: str, problems: list[str]) -> None:
+    """한 종목을 본다. 이상한 게 있으면 [problems]에 담는다. 못 보면 [Unseen]."""
+    meta = meta_of(symbol)
+    bad: list[str] = []
+
+    for key, check in CHECKS.items():
+        if key not in meta:
+            bad.append(f"{key}: 칸이 없다")
+            continue
+        why = check(meta[key])
+        if why:
+            bad.append(f"{key}: {why}")
+
+    # `currentTradingPeriod.regular`가 있어야 **종가인지 현재가인지**를 가른다.
+    regular = (meta.get("currentTradingPeriod") or {}).get("regular")
+    if not isinstance(regular, dict):
+        bad.append("currentTradingPeriod.regular: 없거나 모양이 다르다")
+    else:
+        span_ok = True
+        for key in ("start", "end"):
+            why = _epoch_seconds(regular.get(key))
+            if why:
+                bad.append(f"currentTradingPeriod.regular.{key}: {why}")
+                span_ok = False
+        # 정규장이 한 시간보다 짧거나 하루보다 길면 뭔가 잘못된 것이다.
+        # (길이는 시장마다 다르므로 **정확한 값이 아니라 말이 되는지**만 본다 —
+        #  야후가 말하는 국내 마감은 실제보다 30분 이르다. 그건 앱이 따로 안다.)
+        if span_ok:
+            span = regular["end"] - regular["start"]
+            if not (3_600 <= span <= 86_400):
+                bad.append(f"정규장 길이가 이상하다({span}초)")
+
+    problems += [f"{label}({symbol}): {b}" for b in bad]
+    print(f"{label}({symbol}): 칸 {len(meta)}개 · 이상 {len(bad)}개")
+
+
 def main() -> None:
     problems: list[str] = []
+    pending = list(SYMBOLS)
     unseen: list[str] = []
 
-    for label, symbol in SYMBOLS:
-        try:
-            meta = meta_of(symbol)
-        except Unseen as e:
-            unseen.append(f"{label}({e})")
-            continue
-        bad: list[str] = []
-
-        for key, check in CHECKS.items():
-            if key not in meta:
-                bad.append(f"{key}: 칸이 없다")
-                continue
-            why = check(meta[key])
-            if why:
-                bad.append(f"{key}: {why}")
-
-        # `currentTradingPeriod.regular`가 있어야 **종가인지 현재가인지**를 가른다.
-        regular = (meta.get("currentTradingPeriod") or {}).get("regular")
-        if not isinstance(regular, dict):
-            bad.append("currentTradingPeriod.regular: 없거나 모양이 다르다")
-        else:
-            span_ok = True
-            for key in ("start", "end"):
-                why = _epoch_seconds(regular.get(key))
-                if why:
-                    bad.append(f"currentTradingPeriod.regular.{key}: {why}")
-                    span_ok = False
-            # 정규장이 한 시간보다 짧거나 하루보다 길면 뭔가 잘못된 것이다.
-            # (길이는 시장마다 다르므로 **정확한 값이 아니라 말이 되는지**만 본다 —
-            #  야후가 말하는 국내 마감은 실제보다 30분 이르다. 그건 앱이 따로 안다.)
-            if span_ok:
-                span = regular["end"] - regular["start"]
-                if not (3_600 <= span <= 86_400):
-                    bad.append(f"정규장 길이가 이상하다({span}초)")
-
-        problems += [f"{label}({symbol}): {b}" for b in bad]
-        print(f"{label}({symbol}): 칸 {len(meta)}개 · 이상 {len(bad)}개")
+    # 두 바퀴 돈다. **먼저 묻는 쪽이 손해**라서다 — 첫 바퀴에서 못 본 것은 그사이
+    # 흐른 시간 덕에 두 번째엔 되는 일이 많다(첫 실행에서 국내만 429였다).
+    for round_no in (1, 2):
+        if not pending:
+            break
+        if round_no == 2:
+            print(f"\n못 본 것을 한 번 더 — {SECOND_ROUND_PAUSE}초 쉬고")
+            time.sleep(SECOND_ROUND_PAUSE)
+        still: list[tuple[str, str]] = []
+        unseen = []
+        for label, symbol in pending:
+            try:
+                inspect(label, symbol, problems)
+            except Unseen as e:
+                still.append((label, symbol))
+                unseen.append(f"{label}({e})")
+        pending = still
 
     if problems:
         # 칸 이름만 찍는다 — 값도 종목도 안 남긴다.
@@ -188,11 +211,14 @@ def main() -> None:
         # ⚠️ **실패시키지 않는다.** 못 본 것은 바뀐 것이 아니다.
         print("\n⚠️ 못 본 것: " + " · ".join(unseen))
         print("   러너 IP가 막힌 것일 수 있다 — 앱은 폰에서 부르므로 영향이 없다.")
-        print("   내일 또 본다. **며칠 내리 이러면** 그때 손으로 확인할 것.")
+        print("   내일 또 본다. **며칠 내리 같은 쪽만 못 보면** 그땐 손으로 확인할 것.")
         if len(unseen) == len(SYMBOLS):
             return
+        # 반만 봤으면 **반만 봤다고** 말한다. `그대로다`라고 하면 다 본 줄 안다.
+        print("\n본 것은 모양 그대로다")
+        return
 
-    print("야후 응답 모양 그대로다")
+    print("\n야후 응답 모양 그대로다")
 
 
 main()
