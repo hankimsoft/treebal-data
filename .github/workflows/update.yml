@@ -2,18 +2,16 @@ name: 종목 목록 갱신
 
 on:
   schedule:
-    # **포털이 몇 시에 올리는지 모른다.** 그래서 종가가 나올 만한 창을 넓게 덮는다.
-    # UTC 기준이다 — `8-15`는 **17:17~00:17(KST)**이다.
+    # **매시각 17분에.** 포털이 몇 시에 올리는지 문서에 없어서 하루를 통째로 덮는다.
     #
-    # ⚠️ **정각(`0`)을 피한다.** 전 세계 워크플로가 정각에 몰려서 **지연이 길고
-    # 누락도 잦다.** 어중간한 분으로 두면 같은 횟수로 더 잘 돈다.
-    - cron: '17 8-15 * * *'
-    # 새벽 — 자정을 넘겨 올라온 날의 보험. 얻는 건 적지만 **드는 것도 없다**:
-    # 그날 종가를 이미 잡았으면 **날짜만 짚고 4호출로 끝난다**(스크립트 참고).
-    - cron: '17 17 * * *'
-    - cron: '17 19 * * *'
-    # 06:17(KST) — 마지막 보험. 크론이 통째로 건너뛴 날을 여기서 잡는다.
-    - cron: '17 21 * * *'
+    # ⚠️ **정각(`0`)을 피한다.** 전 세계 워크플로가 정각에 몰려 **지연이 길고 누락도 잦다.**
+    #
+    # 낮엔 열 번쯤 헛돈다(그날 종가가 아직 세상에 없다). 그래도 **드는 게 없다** —
+    # 스크립트가 **날짜만 짚어보고 이미 최신이면 그 자리에서 끝낸다**(호출 4번).
+    # 공개 저장소는 Actions가 무료고, 내용이 안 바뀌면 커밋도 안 한다.
+    #
+    # 며칠 로그를 보면 **실제로 몇 시에 올라오는지** 알 수 있다. 그때 좁혀도 된다.
+    - cron: '17 * * * *'
   # 손으로도 돌릴 수 있게 — **첫 확인은 이걸로 한다.**
   workflow_dispatch:
 
@@ -31,6 +29,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 아래 `git pull --rebase`가 **공통 조상**을 찾을 수 있어야 한다.
+          # 기본값(얕은 클론)에선 조상이 없어 되감기가 깨진다.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -43,13 +45,17 @@ jobs:
           DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}
         run: python scripts/fetch_symbols.py
 
-      # **바뀐 게 없으면 커밋하지 않는다.** 저녁에 여러 번 도는데 커밋은
+      # **바뀐 게 없으면 커밋하지 않는다.** 하루에 스물네 번 도는데 커밋은
       # **하루 한 번**만 생긴다 — 그날 종가가 처음 들어온 그 실행에서.
       - name: 바뀌었으면 커밋
         run: |
           git config user.name  'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add docs/symbols/krx.json docs/prices/krx.json
+          # ⚠️ 경로를 하나씩 적지 않는다 — 그중 하나가 없으면 `git add`가 죽어서
+          # **매시간 빨간 X**가 뜬다. 폴더째 맡기면 있는 것만 담는다.
+          git add -A docs
           git diff --cached --quiet && echo '바뀐 게 없다' && exit 0
-          git commit -m "목록 갱신 $(date -u +%Y-%m-%d)"
-          git push
+          # 날짜는 **KST**다. UTC로 적으면 자정 넘어 도는 실행이 어제 날짜를 단다.
+          git commit -m "데이터 갱신 $(TZ=Asia/Seoul date +%Y-%m-%d)"
+          # 그사이 사람이 커밋했으면 밀리기가 거부된다 — 한 번 얹어보고 다시 민다.
+          git push || (git pull --rebase && git push)

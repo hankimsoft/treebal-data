@@ -181,7 +181,14 @@ CODE = re.compile(r"^(?:[0-9]{4}[A-Z0-9]{2}|[0-9]{8})$")
 
 
 def saved_days() -> dict[str, str]:
-    """지난 실행이 남긴 서비스별 기준일. 파일이 없거나 깨졌으면 빈 값."""
+    """지난 실행이 남긴 서비스별 기준일. 파일이 없거나 깨졌으면 빈 값.
+
+    ⚠️ **내보낼 파일이 하나라도 없으면 빈 값을 준다.** 안 그러면 이런 일이 생긴다 —
+    출력 파일을 하나 더 늘렸는데(2026-09-04에 `prices`를 그렇게 더했다) 그날 날짜가
+    이미 `symbols`에 적혀 있으면 **조기 종료해서 새 파일이 영영 안 만들어진다.**
+    """
+    if not all(p.exists() for p in (SYMBOLS_OUT, PRICES_OUT)):
+        return {}
     try:
         return json.loads(SYMBOLS_OUT.read_text(encoding="utf-8"))["basDt"]
     except Exception:
