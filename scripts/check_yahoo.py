@@ -20,6 +20,23 @@
 
 ⚠️ **종목 목록·종가와 아무 상관이 없다.** 이건 앱이 쓰는 남의 API를 지켜보는 것뿐이고,
 `docs/` 아래 파일은 건드리지 않는다.
+
+## ⚠️ **못 본 것과 바뀐 것은 다르다** (2026-09-04, 첫 실행에서 배웠다)
+
+첫 실행이 **429(요청한도)**로 죽었다. 야후가 바뀐 게 아니라 **GitHub 러너 IP가 막힌 것**이다 —
+Actions 러너 IP는 전 세계가 같이 쓰고 야후를 긁는 사람이 많다. 같은 시각 **폰에서는 멀쩡히**
+받아왔다.
+
+그걸 실패로 치면 **가짜 경보**가 되고, 가짜 경보는 진짜 경보보다 나쁘다 — 메일을 무시하게
+된다. 그래서 갈라 다룬다:
+
+| | 어떻게 |
+|---|---|
+| **못 봤다**(429 · 연결 실패 · 5xx) | 알리고 **통과**시킨다. 내일 또 본다 |
+| **모양이 다르다** | **실패시킨다** → 메일이 온다 |
+
+브라우저처럼 보이는 `User-Agent`를 붙여 본다. 야후는 기본 파이썬 UA를 자주 막는다 —
+그래도 막히면 위 표대로 조용히 넘어간다.
 """
 
 from __future__ import annotations
@@ -31,6 +48,15 @@ import requests
 
 URL = "https://query1.finance.yahoo.com/v8/finance/chart/{}"
 PARAMS = {"range": "5d", "interval": "1d"}
+
+# 야후는 기본 파이썬 UA(`python-requests/...`)를 자주 막는다. 앱은 Dart의 http라 안 걸린다.
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
 
 # 국내와 미국을 **둘 다** 본다 — 한쪽만 바뀔 수 있다(실제로 국내 정규장 시각만
 # 낡아 있었다, 2026-09-04). 오래 상장돼 있고 없어질 일이 없는 것으로 고른다.
@@ -74,35 +100,49 @@ CHECKS = {
 }
 
 TIMEOUT = 20
-RETRIES = 3
-RETRY_PAUSE = 10
+RETRIES = 4
+# 늘려가며 기다린다 — 요청한도는 잠깐 쉬면 풀리는 종류다.
+RETRY_PAUSES = [10, 30, 60]
+
+
+class Unseen(Exception):
+    """**못 봤다.** 야후가 바뀐 게 아니라 우리가 못 본 것이다 — 실패로 치지 않는다."""
 
 
 def meta_of(symbol: str) -> dict:
-    """`chart.result[0].meta`. 잠깐 그런 실패는 몇 번 다시 해본다."""
+    """`chart.result[0].meta`. 못 보면 [Unseen]."""
     last = ""
     for attempt in range(1, RETRIES + 1):
         try:
-            r = requests.get(URL.format(symbol), params=PARAMS, timeout=TIMEOUT)
+            r = requests.get(
+                URL.format(symbol), params=PARAMS, headers=HEADERS, timeout=TIMEOUT
+            )
             if r.status_code == 200:
-                return r.json()["chart"]["result"][0]["meta"]
+                try:
+                    return r.json()["chart"]["result"][0]["meta"]
+                except Exception:
+                    # 200인데 모양이 다르다 — 이건 **진짜 신호**다.
+                    raise
             last = f"HTTP {r.status_code}"
         except Exception as e:
             last = type(e).__name__
         if attempt < RETRIES:
-            print(f"  {last} — {RETRY_PAUSE}초 뒤 다시")
-            time.sleep(RETRY_PAUSE)
-    sys.exit(
-        f"야후를 못 불렀다 ({symbol}): {last}\n"
-        "→ 막힌 것이라면 앱의 시세도 같이 막힌 것이다. reference/yahoo_chart_response.md 참고"
-    )
+            pause = RETRY_PAUSES[attempt - 1]
+            print(f"  {last} — {pause}초 뒤 다시")
+            time.sleep(pause)
+    raise Unseen(f"{symbol}: {last}")
 
 
 def main() -> None:
     problems: list[str] = []
+    unseen: list[str] = []
 
     for label, symbol in SYMBOLS:
-        meta = meta_of(symbol)
+        try:
+            meta = meta_of(symbol)
+        except Unseen as e:
+            unseen.append(f"{label}({e})")
+            continue
         bad: list[str] = []
 
         for key, check in CHECKS.items():
@@ -143,6 +183,14 @@ def main() -> None:
             + "\n\n→ project_docs/reference/yahoo_chart_response.md 를 열어 4절(다시 확인하는 법)대로"
             "\n  기기에서 관찰하고, 문서를 고친 뒤 앱을 손볼 것."
         )
+
+    if unseen:
+        # ⚠️ **실패시키지 않는다.** 못 본 것은 바뀐 것이 아니다.
+        print("\n⚠️ 못 본 것: " + " · ".join(unseen))
+        print("   러너 IP가 막힌 것일 수 있다 — 앱은 폰에서 부르므로 영향이 없다.")
+        print("   내일 또 본다. **며칠 내리 이러면** 그때 손으로 확인할 것.")
+        if len(unseen) == len(SYMBOLS):
+            return
 
     print("야후 응답 모양 그대로다")
 

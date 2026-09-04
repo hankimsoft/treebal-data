@@ -26,6 +26,11 @@
   · **실패하면 아무것도 안 쓴다.** 빈 파일로 덮으면 앱의 검색이 통째로 죽는다.
   · **한 서비스가 막혔다고 전부 멈추지 않는다.** 활용신청이 안 된 서비스가 하나 있으면
     그것만 건너뛴다 — 안 그러면 매시각 실행이 통째로 죽어 **검색·시세가 같이 굳는다.**
+  · **못 부른 것으로는 빨간 X를 띄우지 않는다.** 이건 **매시각** 도는 크론이고 파일은
+    하루 한 번만 바뀐다 — 한 번 못 불렀으면 **다음 시각에 다시 하면 그만**이다.
+    그걸 실패로 치면 포털이 잠깐 흔들릴 때마다 메일이 오고, **가짜 경보는 진짜 경보보다
+    나쁘다**(메일을 무시하게 된다). 2026-09-04 첫 실행이 실제로 그렇게 죽었다.
+    ⚠️ **키가 틀렸거나 응답 모양이 다른 건 여전히 실패시킨다** — 그건 시간이 안 고쳐준다.
 """
 
 # `str | None` 같은 표기를 옛 파이썬에서도 쓰게 해준다(워크플로는 3.12지만
@@ -68,8 +73,9 @@ PAGE = 1000
 PAUSE = 0.2
 # 한 번 삐끗했다고 실행을 통째로 버리지 않는다. 한 실행이 호출을 12~18번 하는데
 # **그중 하나만 타임아웃 나도 전부 헛수고**가 된다(2026-09-03 밤 실제로 그랬다).
-RETRIES = 3
-RETRY_PAUSE = 5
+RETRIES = 4
+# 늘려가며 기다린다 — 포털이 흔들릴 땐 잠깐 쉬는 게 낫다.
+RETRY_PAUSES = [5, 15, 45]
 
 # **주식은 있어야 한다.** 나머지는 없어도 목록이 선다.
 REQUIRED = SERVICES[0][0]
@@ -81,6 +87,13 @@ NOT_REGISTERED = (
     "SERVICE_ACCESS_DENIED_ERROR",
     "NO_OPENAPI_SERVICE_ERROR",
 )
+
+
+class Unreachable(Exception):
+    """**못 불렀다.** 포털이 잠깐 흔들린 것이지 뭔가 잘못된 게 아니다.
+
+    매시각 도는 크론이라 **다음 시각에 다시 하면 그만**이므로 빨간 X를 안 띄운다.
+    """
 
 
 class Unavailable(Exception):
@@ -113,9 +126,12 @@ def call(path: str, **params) -> dict:
             # 공개 저장소의 Actions 로그에 그대로 찍는다. 깃허브의 자동 가리기(***)는
             # **인코딩된 형태를 못 알아본다.** 그래서 **예외의 종류만** 남긴다.
             if attempt == RETRIES:
-                sys.exit(f"연결 실패: {type(e).__name__} ({path}) — {RETRIES}번 시도")
-            print(f"  연결 실패({type(e).__name__}) — {RETRY_PAUSE}초 뒤 다시")
-            time.sleep(RETRY_PAUSE)
+                raise Unreachable(
+                    f"연결 실패: {type(e).__name__} ({path}) — {RETRIES}번 시도"
+                ) from None
+            pause = RETRY_PAUSES[attempt - 1]
+            print(f"  연결 실패({type(e).__name__}) — {pause}초 뒤 다시")
+            time.sleep(pause)
             continue
 
         if r.status_code == 200:
@@ -134,12 +150,15 @@ def call(path: str, **params) -> dict:
         # 5xx·429는 잠깐 그런 것일 수 있다. 4xx는 다시 해도 같다.
         # ⚠️ r.url도 r.text도 찍지 않는다 — 둘 다 키를 담고 있을 수 있다.
         retryable = r.status_code >= 500 or r.status_code == 429
-        if not retryable or attempt == RETRIES:
-            sys.exit(f"조회 실패: HTTP {r.status_code} ({path})")
-        print(f"  HTTP {r.status_code} — {RETRY_PAUSE}초 뒤 다시")
-        time.sleep(RETRY_PAUSE)
+        if not retryable:
+            sys.exit(f"조회 실패: HTTP {r.status_code} ({path}) — 다시 해도 같다")
+        if attempt == RETRIES:
+            raise Unreachable(f"HTTP {r.status_code} ({path}) — {RETRIES}번 시도")
+        pause = RETRY_PAUSES[attempt - 1]
+        print(f"  HTTP {r.status_code} — {pause}초 뒤 다시")
+        time.sleep(pause)
 
-    sys.exit(f"조회 실패 ({path})")  # 여기 오지 않는다
+    raise Unreachable(f"조회 실패 ({path})")  # 여기 오지 않는다
 
 
 def rows_of(body: dict) -> list[dict]:
@@ -323,4 +342,11 @@ def main() -> None:
     print(f"이름 {len(names)}개 · 종가 {len(prices)}개를 썼다")
 
 
-main()
+try:
+    main()
+except Unreachable as e:
+    # ⚠️ **실패시키지 않는다.** 매시각 도는 크론이라 다음 시각에 다시 하면 그만이다.
+    # 파일은 안 건드렸으니 앱은 어제 값을 그대로 본다 — 그게 설계한 대로다.
+    print(f"\n⚠️ 이번엔 못 불렀다 — {e}")
+    print("   포털이 잠깐 흔들린 것이다. 다음 시각에 다시 한다.")
+    print("   **하루 내내 이러면** 그때 포털 상태를 볼 것.")
