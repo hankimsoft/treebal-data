@@ -39,8 +39,8 @@ Actions 러너 IP는 전 세계가 같이 쓰고 야후를 긁는 사람이 많�
 100초를 기다리는 동안 한도가 풀려 **미국이 그 덕을 봤다.** 그래서 한 바퀴 돈 뒤
 **못 본 것만 한 번 더** 물어본다.
 
-브라우저처럼 보이는 `User-Agent`를 붙여 본다. 야후는 기본 파이썬 UA를 자주 막는다 —
-그래도 막히면 위 표대로 조용히 넘어간다.
+`User-Agent`는 **알려진 도구 이름이 아닌 것**을 쓴다. 브라우저인 척하면 오히려 막힌다 —
+아래 `HEADERS` 주석에 실측 표가 있다. 그래도 막히면 위 표대로 조용히 넘어간다.
 """
 
 from __future__ import annotations
@@ -57,12 +57,28 @@ HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]
 URL = "https://{}/v8/finance/chart/{}"
 PARAMS = {"range": "5d", "interval": "1d"}
 
-# 야후는 기본 파이썬 UA(`python-requests/...`)를 자주 막는다. 앱은 Dart의 http라 안 걸린다.
+# ⚠️ **브라우저인 척하지 않는다.** 야후는 **알려진 스크래퍼 UA를 막는데, 브라우저 UA도 그
+# 목록에 있다** — 스크래퍼가 죄다 브라우저를 흉내 내기 때문으로 보인다. 2026-09-05에
+# 같은 주소로 UA만 바꿔가며 재봤다(맥, 각 3~5회):
+#
+#   429 : curl/8.7.1 · python-requests/2.32.3 · python-urllib/3.11 · Go-http-client/2.0
+#         · 데스크톱 Chrome · (UA 없음)
+#   200 : Dart/3.9 (dart:io) · okhttp/4.12.0 · treebal/1.0 · 아무 이름이나
+#
+# 즉 **알려진 도구 이름만 막고 나머지는 통과**시킨다. 조건은 그것뿐이라 **아무 이름이나**
+# 된다 — `quote-check` · `health-check` · `schema-check` 전부 4/4 통과했다.
+#
+# ⚠️ **브라우저를 흉내 내지 말 것.** 막히는 쪽이고, 게다가 거짓말이다.
+# ⚠️ **앱·서비스 이름을 넣지 않는다.** 통과하는 데 필요 없고, 로그에 남길 이유도 없다.
+#    하는 일(`quote-check`)만 밝히면 충분하다.
+#
+# 앱은 Dart의 http 기본 UA라 원래 안 걸린다(`lib/services/yahoo_chart.dart` 참고 —
+# 거기엔 **헤더를 붙이지 말라**고 적혀 있다).
+#
+# ⚠️ 이걸 고쳐도 **GitHub 러너 IP 자체가 막혀 있으면 그대로 429**다. 그때는 위 표대로
+# 조용히 넘어가고, 며칠 내리 같은 쪽만 `못 본 것`에 뜨면 손으로 확인한다.
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/128.0 Safari/537.36"
-    ),
+    "User-Agent": "quote-check/1.0",
     "Accept": "application/json",
 }
 
