@@ -33,7 +33,13 @@ Actions 러너 IP는 전 세계가 같이 쓰고 야후를 긁는 사람이 많�
 | | 어떻게 |
 |---|---|
 | **못 봤다**(429 · 연결 실패 · 5xx) | 알리고 **통과**시킨다. 내일 또 본다 |
-| **모양이 다르다** | **실패시킨다** → 메일이 온다 |
+| **모양이 다르다**(칸 · 타입 · 단위) | **실패시킨다** → 메일이 온다 |
+| **200인데 구조가 깨졌다** | **실패시킨다** — 이것도 바뀐 것이다 |
+
+⚠️ 마지막 줄은 **2026-09-08까지 구멍이었다.** `raise`만 하고 바깥 `except Exception`이
+도로 삼켜서 *"못 봤다"*로 통과했다. 주석은 *"진짜 신호"*라는데 코드는 조용했다 —
+**주석이 지키는 건 아무것도 없다.** 지금은 [Malformed]로 갈라 두고, 그걸
+`scripts/test_check_yahoo.py`가 붙든다.
 
 ⚠️ **먼저 묻는 쪽이 손해다.** 첫 실행에서 국내는 429인데 미국은 됐다 — 국내가 재시도로
 100초를 기다리는 동안 한도가 풀려 **미국이 그 덕을 봤다.** 그래서 한 바퀴 돈 뒤
@@ -140,6 +146,15 @@ class Unseen(Exception):
     """**못 봤다.** 야후가 바뀐 게 아니라 우리가 못 본 것이다 — 실패로 치지 않는다."""
 
 
+class Malformed(Exception):
+    """**200인데 우리가 아는 구조가 아니다.** 이건 진짜 신호다 — 실패시킨다.
+
+    ⚠️ [Unseen]과 **반드시 갈라야 한다**(2026-09-08에 구멍을 찾았다). 예전엔 여기서
+    그냥 `raise`만 했는데, **바로 바깥의 `except Exception`이 도로 삼켜** *"못 봤다"*가 됐다.
+    주석엔 *"진짜 신호"*라고 적혀 있었는데 코드는 조용히 넘어갔다 — 야후가 엔드포인트
+    응답을 통째로 바꾸거나 `chart.error`를 줘도 **메일이 안 왔다.**"""
+
+
 def meta_of(symbol: str) -> dict:
     """`chart.result[0].meta`. 못 보면 [Unseen]."""
     last = ""
@@ -155,10 +170,17 @@ def meta_of(symbol: str) -> dict:
             if r.status_code == 200:
                 try:
                     return r.json()["chart"]["result"][0]["meta"]
-                except Exception:
+                except Exception as e:
                     # 200인데 모양이 다르다 — 이건 **진짜 신호**다.
-                    raise
+                    raise Malformed(
+                        f"200인데 `chart.result[0].meta`를 못 찾는다"
+                        f"({type(e).__name__})"
+                    ) from e
             last = f"HTTP {r.status_code} ({host.split('.')[0]})"
+        except Malformed:
+            # ⚠️ **다시 던진다.** 아래 `except Exception`이 잡으면 *"못 봤다"*가 되어
+            # 조용히 통과한다 — 그게 2026-09-08까지 있던 구멍이다.
+            raise
         except Exception as e:
             last = f"{type(e).__name__} ({host.split('.')[0]})"
         if attempt < RETRIES:
@@ -222,6 +244,10 @@ def main() -> None:
         for label, symbol in pending:
             try:
                 inspect(label, symbol, problems)
+            except Malformed as e:
+                # 다시 물어볼 게 아니다 — 야후가 바뀐 것이다.
+                problems.append(f"{label}({symbol}): {e}")
+                print(f"{label}({symbol}): {e}")
             except Unseen as e:
                 still.append((label, symbol))
                 unseen.append(f"{label}({e})")
